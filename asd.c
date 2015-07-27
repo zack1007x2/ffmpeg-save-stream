@@ -36,7 +36,7 @@
 #include <libavutil/opt.h>
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
-
+#include <libswresample/swresample.h>
 
 static AVFormatContext *fmt_ctx = NULL;
 static AVCodecContext *video_dec_ctx = NULL, *audio_dec_ctx;
@@ -79,6 +79,9 @@ static AVFrame *AudFrame;
 static AVPacket AudPkt;
 static int aud_buffer_size;
 static uint8_t *sample_buf;
+
+static int16_t* outputBuffer;
+SwrContext *swr;
 
 
 /* The different ways of decoding and managing data memory. You are not
@@ -307,11 +310,17 @@ static int decode_packet(int *got_frame, int cached)
             // printf("@@@@@@@@@@@@@@@@@@@@@@ AUDIO farme data @@@@@@@@@@@@@@@@@@\n");
             // print_hex(frame->extended_data[0],strlen((char*)frame->extended_data[0]));
             // fwrite(frame->extended_data[0], 1, unpadded_linesize, audio_dst_file);
-
+            ret = swr_convert(swr,
+                          AudFrame->data, frame->nb_samples,
+                          (const uint8_t **)frame->extended_data, frame->nb_samples);
+            if (ret < 0) {
+                fprintf(stderr, "Error while converting\n");
+                exit(1);
+            }
             
-            sample_buf = frame->extended_data[0];
+            // sample_buf = frame->extended_data[0];
 
-            AudFrame->data[0] = sample_buf;//raw audio data
+            // AudFrame->data[0] = sample_buf;//raw audio data
 
             // print_hex(AudFrame->data[0],strlen((char*)AudFrame->data[0]));
             
@@ -691,7 +700,14 @@ int main (int argc, char **argv)
     pFrame->width = 240;
     pFrame->height = 160;
     pFrame->format = pCodecCtx->pix_fmt;
-
+    swr = swr_alloc();
+    av_opt_set_int(swr, "in_channel_layout",  audio_dec_ctx->channel_layout, 0);
+    av_opt_set_int(swr, "out_channel_layout", AudCodecCtx->channel_layout,  0);
+    av_opt_set_int(swr, "in_sample_rate",     audio_dec_ctx->sample_rate, 0);
+    av_opt_set_int(swr, "out_sample_rate",    AudCodecCtx->sample_rate, 0);
+    av_opt_set_sample_fmt(swr, "in_sample_fmt",  AV_SAMPLE_FMT_FLTP, 0);
+    av_opt_set_sample_fmt(swr, "out_sample_fmt", AV_SAMPLE_FMT_S16,  0);
+    swr_init(swr);
 
 
 
