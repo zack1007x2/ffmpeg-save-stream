@@ -70,12 +70,15 @@ static AVFrame* pFrame;
 static int picture_size;
 static int y_size;
 
-AVCodec *AudCodec;
-AVCodecContext *AudCodecCtx= NULL;
-AVFrame *AudFrame;
-AVPacket AudPkt;
-int aud_buffer_size;
-uint16_t *samples;
+static AVCodec *AudCodec;
+static AVCodecContext *AudCodecCtx= NULL;
+static AVFormatContext* AudFormatCtx;
+static AVOutputFormat* Audofmt;
+static AVStream* audio_st;
+static AVFrame *AudFrame;
+static AVPacket AudPkt;
+static int aud_buffer_size;
+static uint8_t *sample_buf;
 
 
 /* The different ways of decoding and managing data memory. You are not
@@ -267,7 +270,7 @@ static int decode_packet(int *got_frame, int cached)
                 printf("Succeed to encode frame: %5d\tsize:%5d\n",video_frame_count,epkt.size);
                 video_frame_count++;
                 epkt.stream_index = video_st->index;
-                ret = av_write_frame(pFormatCtx, &epkt);
+                ret = av_interleaved_write_frame(pFormatCtx, &epkt);
                 av_free_packet(&epkt);
             }
         }
@@ -289,8 +292,9 @@ static int decode_packet(int *got_frame, int cached)
             size_t unpadded_linesize = frame->nb_samples * av_get_bytes_per_sample(frame->format);
             printf("audio_frame%s n:%d nb_samples:%d pts:%s\n",
                    cached ? "(cached)" : "",
-                   audio_frame_count++, frame->nb_samples,
+                   audio_frame_count, frame->nb_samples,
                    av_ts2timestr(frame->pts, &audio_dec_ctx->time_base));
+            printf("################################\n");
 
             /* Write the raw audio data samples of the first plane. This works
              * fine for packed formats (e.g. AV_SAMPLE_FMT_S16). However,
@@ -304,17 +308,29 @@ static int decode_packet(int *got_frame, int cached)
             // print_hex(frame->extended_data[0],strlen((char*)frame->extended_data[0]));
             // fwrite(frame->extended_data[0], 1, unpadded_linesize, audio_dst_file);
 
-            AudFrame->data[0] = frame->extended_data[0];
+            
+            sample_buf = frame->extended_data[0];
 
-            retuu = avcodec_encode_audio2(AudCodecCtx, &AudPkt, AudFrame, &got_output);
-            if (retuu < 0) {
-                fprintf(stderr, "Error encoding audio frame\n");
-                exit(1);
-            }
-            if (got_output) {
-                fwrite(AudPkt.data, 1, AudPkt.size, audio_dst_file);
-                av_free_packet(&AudPkt);
-            }
+            AudFrame->data[0] = sample_buf;//raw audio data
+
+            // print_hex(AudFrame->data[0],strlen((char*)AudFrame->data[0]));
+            
+            int got_audio_frame=0;
+            //Encode  
+            retuu = avcodec_encode_audio2(AudCodecCtx, &AudPkt,AudFrame, &got_audio_frame);  
+            if(retuu < 0){  
+                printf("Failed to encode!\n");  
+                return -1;  
+            }  
+            if (got_audio_frame==1){  
+                printf("audio_frame_count = %d\n", audio_frame_count);
+                printf("SUCCESS to encode 1 audio frame! \tsize:%5d\n",AudPkt.size); 
+                
+                audio_frame_count++;
+                AudPkt.stream_index = audio_st->index;  
+                ret = av_interleaved_write_frame(AudFormatCtx, &AudPkt);  
+                av_free_packet(&AudPkt);  
+            } 
         }
     }
 
@@ -434,15 +450,20 @@ int main (int argc, char **argv)
     av_register_all();
     avformat_network_init();
 
+    //init output format
     pFormatCtx = avformat_alloc_context();
-    //Guess Format
     fmt = av_guess_format(NULL, video_dst_filename, NULL);
-
     pFormatCtx->oformat = fmt;
 
 
+    AudFormatCtx = avformat_alloc_context();
+    Audofmt = av_guess_format(NULL, audio_dst_filename, NULL);
+    AudFormatCtx->oformat = Audofmt;
 
 
+
+
+    //get input format
     /* open input file, and allocate format context */
     if (avformat_open_input(&fmt_ctx, src_filename, NULL, NULL) < 0) {
         fprintf(stderr, "Could not open source file %s\n", src_filename);
@@ -455,6 +476,7 @@ int main (int argc, char **argv)
         exit(1);
     }
 
+    //get input codec and stream
     if (open_codec_context(&video_stream_idx, fmt_ctx, AVMEDIA_TYPE_VIDEO) >= 0) {
         video_stream = fmt_ctx->streams[video_stream_idx];
         video_dec_ctx = video_stream->codec;
@@ -480,16 +502,10 @@ int main (int argc, char **argv)
         video_dst_bufsize = ret;
     }
 
-
-    //Open output URL
-    if (avio_open(&pFormatCtx->pb,video_dst_filename, AVIO_FLAG_READ_WRITE) < 0){
-        printf("Failed to open output file! \n");
-        return -1;
-    }
-
     if (open_codec_context(&audio_stream_idx, fmt_ctx, AVMEDIA_TYPE_AUDIO) >= 0) {
         audio_stream = fmt_ctx->streams[audio_stream_idx];
         audio_dec_ctx = audio_stream->codec;
+        AudCodecCtx = audio_stream->codec;
         audio_dst_file = fopen(audio_dst_filename, "wb");
         if (!audio_dst_file) {
             fprintf(stderr, "Could not open destination file %s\n", audio_dst_filename);
@@ -497,6 +513,20 @@ int main (int argc, char **argv)
             goto end;
         }
     }
+
+
+    //Open output 
+    if (avio_open(&pFormatCtx->pb,video_dst_filename, AVIO_FLAG_READ_WRITE) < 0){
+        printf("Failed to open output file! \n");
+        return -1;
+    }
+
+    if (avio_open(&AudFormatCtx->pb,audio_dst_filename, AVIO_FLAG_READ_WRITE) < 0){  
+        printf("Failed to open output file!\n");  
+        return -1;  
+    }  
+
+    
 
     video_st = avformat_new_stream(pFormatCtx, 0);
     video_st->time_base.num = 1; 
@@ -506,91 +536,52 @@ int main (int argc, char **argv)
         return -1;
     }
 
-    
-    
-
-    //////////////////////Audio encode init///////////////////////////
-    AudCodec = avcodec_find_encoder(AV_CODEC_ID_AAC);
-    if (!AudCodec) {
-        fprintf(stderr, "Codec not found\n");
-        exit(1);
+    audio_st = avformat_new_stream(AudFormatCtx, 0);  
+    if (audio_st==NULL){  
+        return -1;  
     }
 
-    AudCodecCtx = avcodec_alloc_context3(AudCodec);
-    if (!AudCodecCtx) {
-        fprintf(stderr, "Could not allocate audio codec context\n");
-        exit(1);
-    }
-
-    
-    /* put sample parameters */
-    AudCodecCtx->bit_rate = 64000;
-
+    AudCodecCtx = audio_st->codec;
+    AudCodecCtx->codec_id = Audofmt->audio_codec;
+    AudCodecCtx->codec_type = AVMEDIA_TYPE_AUDIO;
     AudCodecCtx->sample_fmt = AV_SAMPLE_FMT_S16;
-    if (!check_sample_fmt(AudCodec, AudCodecCtx->sample_fmt)) {
-        fprintf(stderr, "Encoder does not support sample format %s",
-                av_get_sample_fmt_name(AudCodecCtx->sample_fmt));
-        exit(1);
-    }
-    AudCodecCtx->sample_rate    = select_sample_rate(AudCodec);
-    AudCodecCtx->channel_layout = select_channel_layout(AudCodec);
-    AudCodecCtx->channels       = av_get_channel_layout_nb_channels(AudCodecCtx->channel_layout);
+    AudCodecCtx->sample_rate= 12000;
+    AudCodecCtx->channel_layout=AV_CH_LAYOUT_STEREO;
+    AudCodecCtx->channels = av_get_channel_layout_nb_channels(AudCodecCtx->channel_layout);
+    // AudCodecCtx->bit_rate = 64000; 
+    
+    // AudCodecCtx->sample_fmt         = audio_dec_ctx->sample_fmt;  
+    // AudCodecCtx->sample_rate        = audio_dec_ctx->sample_rate;  
+    // AudCodecCtx->channel_layout     = audio_dec_ctx->channel_layout;  
+    // AudCodecCtx->channels           = av_get_channel_layout_nb_channels(audio_dec_ctx->channel_layout);  
+    AudCodecCtx->bit_rate           = audio_dec_ctx->bit_rate;
 
+    // AudCodecCtx->sample_rate    = select_sample_rate(AudCodec);
+    // AudCodecCtx->channel_layout = select_channel_layout(AudCodec);
+    // AudCodecCtx->channels       = av_get_channel_layout_nb_channels(AudCodecCtx->channel_layout);  
 
+    AudCodec = avcodec_find_encoder(AudCodecCtx->codec_id);  
+    if (!AudCodec){  
+        printf("Can not find encoder!\n");  
+        return -1;  
+    }  
+    if (avcodec_open2(AudCodecCtx, AudCodec,NULL) < 0){  
+        printf("Failed to open encoder!\n");  
+        return -1;  
+    } 
 
-    printf("sample_fmt = %s\n", av_get_sample_fmt_name(AudCodecCtx->sample_fmt));
-    printf("sample_rate = %d channels = %d bit_rate = %d\n", AudCodecCtx->sample_rate, AudCodecCtx->channels, AudCodecCtx->bit_rate);
-
-
-
-    /* open it */
-    if (avcodec_open2(AudCodecCtx, AudCodec, NULL) < 0) {
-        fprintf(stderr, "Could not open codec\n");
-        exit(1);
-    }
-
-    /* frame containing input raw audio */
-    AudFrame = av_frame_alloc();
-    if (!AudFrame) {
-        fprintf(stderr, "Could not allocate audio frame\n");
-        exit(1);
-    }
-
+    AudFrame = av_frame_alloc();  
     AudFrame->nb_samples     = AudCodecCtx->frame_size;
     AudFrame->format         = AudCodecCtx->sample_fmt;
-    AudFrame->channel_layout = AudCodecCtx->channel_layout;
+    // AudFrame->channel_layout = AudCodecCtx->channel_layout;
 
+    aud_buffer_size = av_samples_get_buffer_size(NULL, AudCodecCtx->channels,AudCodecCtx->frame_size,AudCodecCtx->sample_fmt, 1);  
+    sample_buf = (uint8_t *)av_malloc(aud_buffer_size);  
+    avcodec_fill_audio_frame(AudFrame, AudCodecCtx->channels, AudCodecCtx->sample_fmt,(const uint8_t*)sample_buf, aud_buffer_size, 1);
 
-
-    /* the codec gives us the frame size, in samples,
-     * we calculate the size of the samples buffer in bytes */
-    aud_buffer_size = av_samples_get_buffer_size(NULL, AudCodecCtx->channels, AudCodecCtx->frame_size,
-                                             AudCodecCtx->sample_fmt, 0);
-    if (aud_buffer_size < 0) {
-        fprintf(stderr, "Could not get sample buffer size\n");
-        exit(1);
-    }
-    samples = av_malloc(aud_buffer_size);
-    if (!samples) {
-        fprintf(stderr, "Could not allocate %d bytes for samples buffer\n",
-                aud_buffer_size);
-        exit(1);
-    }
-    /* setup the data pointers in the AVFrame */
-    Audret = avcodec_fill_audio_frame(AudFrame, AudCodecCtx->channels, AudCodecCtx->sample_fmt,
-                                   (const uint8_t*)samples, aud_buffer_size, 0);
-
-    if (Audret < 0) {
-        fprintf(stderr, "Could not setup audio frame\n");
-        exit(1);
-    }
-
-    av_init_packet(&AudPkt);
-    AudPkt.data = NULL; // packet data will be allocated by the encoder
-    AudPkt.size = 0;
 
     ///////////////////////////////////////////////////////////////////
-
+    
 
 
     printf("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n");
@@ -665,6 +656,12 @@ int main (int argc, char **argv)
     //Show some Information
     av_dump_format(pFormatCtx, 0, video_dst_filename, 1);
 
+    printf("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n");
+    //Show some information  
+    av_dump_format(AudFormatCtx, 0, audio_dst_filename, 1);
+
+
+
     pCodec = avcodec_find_encoder(pCodecCtx->codec_id);
     if (!pCodec){
         printf("Can not find encoder! \n");
@@ -682,9 +679,12 @@ int main (int argc, char **argv)
 
     printf("picture_buf = %d\n", picture_size);
 
-    //Write File Header
+    //Write video Header
     avformat_write_header(pFormatCtx,NULL);
-
+    //Write audio Header
+    avformat_write_header(AudFormatCtx,NULL);
+    
+    av_new_packet(&AudPkt,aud_buffer_size);  
     av_new_packet(&epkt,picture_size);
 
     y_size = pCodecCtx->width * pCodecCtx->height;
@@ -723,8 +723,20 @@ int main (int argc, char **argv)
         return -1;
     }
 
-    //Write file trailer
+    //Flush Encoder  
+    ret = flush_encoder(pFormatCtx,0);  
+    if (ret < 0) {  
+        printf("Flushing encoder failed\n");  
+        return -1;  
+    }  
+
+    //Write video trailer
     av_write_trailer(pFormatCtx);
+  
+    //Writeaudio Trailer  
+    av_write_trailer(AudFormatCtx);  
+  
+    
 
     printf("Demuxing succeeded.\n");
 
@@ -762,7 +774,14 @@ int main (int argc, char **argv)
 
 
 end:
-
+    //Clean  
+    if (audio_st){  
+        avcodec_close(audio_st->codec);  
+        av_free(AudFrame);  
+        av_free(sample_buf);  
+    }  
+    avio_close(AudFormatCtx->pb);  
+    avformat_free_context(AudFormatCtx);
 
     //Clean
     if (video_st){
