@@ -793,7 +793,7 @@ end:
         avcodec_free_frame(&frame);
     else
         av_frame_free(&frame);
-    av_free(video_dst_data[0]);
+    
 
     return ret < 0;
 }
