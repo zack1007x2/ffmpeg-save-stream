@@ -46,6 +46,7 @@ static AVStream *video_stream = NULL, *audio_stream = NULL;
 static const char *src_filename = NULL;
 static const char *video_dst_filename = NULL;
 static const char *audio_dst_filename = NULL;
+static const char *out_filename = NULL;
 static FILE *video_dst_file = NULL;
 static FILE *audio_dst_file = NULL;
 
@@ -258,8 +259,6 @@ static int decode_packet(int *got_frame, int cached)
             pFrame->data[0] = picture_buf;              // Y
             pFrame->data[1] = picture_buf+ y_size;      // U 
             pFrame->data[2] = picture_buf+ y_size*5/4;  // V
-
-            
             //PTS
             pFrame->pts=video_frame_count;
             int got_picture=0;
@@ -317,13 +316,7 @@ static int decode_packet(int *got_frame, int cached)
                 fprintf(stderr, "Error while converting\n");
                 exit(1);
             }
-            
-            // sample_buf = frame->extended_data[0];
 
-            // AudFrame->data[0] = sample_buf;//raw audio data
-
-            // print_hex(AudFrame->data[0],strlen((char*)AudFrame->data[0]));
-            
             int got_audio_frame=0;
             //Encode  
             retuu = avcodec_encode_audio2(AudCodecCtx, &AudPkt,AudFrame, &got_audio_frame);  
@@ -421,121 +414,17 @@ static int get_format_from_sample_fmt(const char **fmt,
     return -1;
 }
 
-int main (int argc, char **argv)
-{
-    int ret = 0, got_frame;
-    int Audret = 0;
-
-    if (argc != 4 && argc != 5) {
-        fprintf(stderr, "usage: %s [-refcount=<old|new_norefcount|new_refcount>] "
-                "input_file video_output_file audio_output_file\n"
-                "API example program to show how to read frames from an input file.\n"
-                "This program reads frames from a file, decodes them, and writes decoded\n"
-                "video frames to a rawvideo file named video_output_file, and decoded\n"
-                "audio frames to a rawaudio file named audio_output_file.\n\n"
-                "If the -refcount option is specified, the program use the\n"
-                "reference counting frame system which allows keeping a copy of\n"
-                "the data for longer than one decode call. If unset, it's using\n"
-                "the classic old method.\n"
-                "\n", argv[0]);
-        exit(1);
-    }
-    if (argc == 5) {
-        const char *mode = argv[1] + strlen("-refcount=");
-        if      (!strcmp(mode, "old"))            api_mode = API_MODE_OLD;
-        else if (!strcmp(mode, "new_norefcount")) api_mode = API_MODE_NEW_API_NO_REF_COUNT;
-        else if (!strcmp(mode, "new_refcount"))   api_mode = API_MODE_NEW_API_REF_COUNT;
-        else {
-            fprintf(stderr, "unknow mode '%s'\n", mode);
-            exit(1);
-        }
-        argv++;
-    }
-    src_filename = argv[1];
-    video_dst_filename = argv[2];
-    audio_dst_filename = argv[3];
-
-    /* register all formats and codecs */
-    av_register_all();
-    avformat_network_init();
-
-    //init output format
+static int init_video_out_context(){
+     //init output format
     pFormatCtx = avformat_alloc_context();
     fmt = av_guess_format(NULL, video_dst_filename, NULL);
     pFormatCtx->oformat = fmt;
-
-
-    AudFormatCtx = avformat_alloc_context();
-    Audofmt = av_guess_format(NULL, audio_dst_filename, NULL);
-    AudFormatCtx->oformat = Audofmt;
-
-
-
-
-    //get input format
-    /* open input file, and allocate format context */
-    if (avformat_open_input(&fmt_ctx, src_filename, NULL, NULL) < 0) {
-        fprintf(stderr, "Could not open source file %s\n", src_filename);
-        exit(1);
-    }
-
-    /* retrieve stream information */
-    if (avformat_find_stream_info(fmt_ctx, NULL) < 0) {
-        fprintf(stderr, "Could not find stream information\n");
-        exit(1);
-    }
-
-    //get input codec and stream
-    if (open_codec_context(&video_stream_idx, fmt_ctx, AVMEDIA_TYPE_VIDEO) >= 0) {
-        video_stream = fmt_ctx->streams[video_stream_idx];
-        video_dec_ctx = video_stream->codec;
-        pCodecCtx = video_stream->codec;
-
-        video_dst_file = fopen(video_dst_filename, "wb");
-        if (!video_dst_file) {
-            fprintf(stderr, "Could not open destination file %s\n", video_dst_filename);
-            ret = 1;
-            goto end;
-        }
-
-        /* allocate image where the decoded image will be put */
-        width = video_dec_ctx->width;
-        height = video_dec_ctx->height;
-        pix_fmt = video_dec_ctx->pix_fmt;
-        ret = av_image_alloc(video_dst_data, video_dst_linesize,
-                             width, height, pix_fmt, 1);
-        if (ret < 0) {
-            fprintf(stderr, "Could not allocate raw video buffer\n");
-            goto end;
-        }
-        video_dst_bufsize = ret;
-    }
-
-    if (open_codec_context(&audio_stream_idx, fmt_ctx, AVMEDIA_TYPE_AUDIO) >= 0) {
-        audio_stream = fmt_ctx->streams[audio_stream_idx];
-        audio_dec_ctx = audio_stream->codec;
-        AudCodecCtx = audio_stream->codec;
-        audio_dst_file = fopen(audio_dst_filename, "wb");
-        if (!audio_dst_file) {
-            fprintf(stderr, "Could not open destination file %s\n", audio_dst_filename);
-            ret = 1;
-            goto end;
-        }
-    }
-
 
     //Open output 
     if (avio_open(&pFormatCtx->pb,video_dst_filename, AVIO_FLAG_READ_WRITE) < 0){
         printf("Failed to open output file! \n");
         return -1;
     }
-
-    if (avio_open(&AudFormatCtx->pb,audio_dst_filename, AVIO_FLAG_READ_WRITE) < 0){  
-        printf("Failed to open output file!\n");  
-        return -1;  
-    }  
-
-    
 
     video_st = avformat_new_stream(pFormatCtx, 0);
     video_st->time_base.num = 1; 
@@ -544,59 +433,6 @@ int main (int argc, char **argv)
     if (video_st==NULL){
         return -1;
     }
-
-    audio_st = avformat_new_stream(AudFormatCtx, 0);  
-    if (audio_st==NULL){  
-        return -1;  
-    }
-
-    AudCodecCtx = audio_st->codec;
-    AudCodecCtx->codec_id = Audofmt->audio_codec;
-    AudCodecCtx->codec_type = AVMEDIA_TYPE_AUDIO;
-    AudCodecCtx->sample_fmt = AV_SAMPLE_FMT_S16;
-    AudCodecCtx->sample_rate= 12000;
-    AudCodecCtx->channel_layout=AV_CH_LAYOUT_STEREO;
-    AudCodecCtx->channels = av_get_channel_layout_nb_channels(AudCodecCtx->channel_layout);
-    // AudCodecCtx->bit_rate = 64000; 
-    
-    // AudCodecCtx->sample_fmt         = audio_dec_ctx->sample_fmt;  
-    // AudCodecCtx->sample_rate        = audio_dec_ctx->sample_rate;  
-    // AudCodecCtx->channel_layout     = audio_dec_ctx->channel_layout;  
-    // AudCodecCtx->channels           = av_get_channel_layout_nb_channels(audio_dec_ctx->channel_layout);  
-    AudCodecCtx->bit_rate           = audio_dec_ctx->bit_rate;
-
-    // AudCodecCtx->sample_rate    = select_sample_rate(AudCodec);
-    // AudCodecCtx->channel_layout = select_channel_layout(AudCodec);
-    // AudCodecCtx->channels       = av_get_channel_layout_nb_channels(AudCodecCtx->channel_layout);  
-
-    AudCodec = avcodec_find_encoder(AudCodecCtx->codec_id);  
-    if (!AudCodec){  
-        printf("Can not find encoder!\n");  
-        return -1;  
-    }  
-    if (avcodec_open2(AudCodecCtx, AudCodec,NULL) < 0){  
-        printf("Failed to open encoder!\n");  
-        return -1;  
-    } 
-
-    AudFrame = av_frame_alloc();  
-    AudFrame->nb_samples     = AudCodecCtx->frame_size;
-    AudFrame->format         = AudCodecCtx->sample_fmt;
-    // AudFrame->channel_layout = AudCodecCtx->channel_layout;
-
-    aud_buffer_size = av_samples_get_buffer_size(NULL, AudCodecCtx->channels,AudCodecCtx->frame_size,AudCodecCtx->sample_fmt, 1);  
-    sample_buf = (uint8_t *)av_malloc(aud_buffer_size);  
-    avcodec_fill_audio_frame(AudFrame, AudCodecCtx->channels, AudCodecCtx->sample_fmt,(const uint8_t*)sample_buf, aud_buffer_size, 1);
-
-
-    ///////////////////////////////////////////////////////////////////
-    
-
-
-    printf("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n");
-    /* dump input information to stderr */
-    av_dump_format(fmt_ctx, 0, src_filename, 0);
-
     //Param that must set
     pCodecCtx = video_st->codec;
     pCodecCtx->codec_id = fmt->video_codec;
@@ -632,44 +468,8 @@ int main (int argc, char **argv)
         av_dict_set(&param, "tune", "zero-latency", 0);
     }
 
-    if (!audio_stream && !video_stream) {
-        fprintf(stderr, "Could not find audio or video stream in the input, aborting\n");
-        ret = 1;
-        goto end;
-    }
-
-    /* When using the new API, you need to use the libavutil/frame.h API, while
-     * the classic frame management is available in libavcodec */
-    if (api_mode == API_MODE_OLD)
-        frame = avcodec_alloc_frame();
-    else
-        frame = av_frame_alloc();
-    if (!frame) {
-        fprintf(stderr, "Could not allocate frame\n");
-        ret = AVERROR(ENOMEM);
-        goto end;
-    }
-
-    /* initialize packet, set data to NULL, let the demuxer fill it */
-    // av_init_packet(&pkt);
-    // pkt.data = NULL;
-    // pkt.size = 0;
-
-    if (video_stream)
-        printf("Demuxing video from file '%s' into '%s'\n", src_filename, video_dst_filename);
-    if (audio_stream)
-        printf("Demuxing audio from file '%s' into '%s'\n", src_filename, audio_dst_filename);
-
-
-    printf("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n");
     //Show some Information
     av_dump_format(pFormatCtx, 0, video_dst_filename, 1);
-
-    printf("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n");
-    //Show some information  
-    av_dump_format(AudFormatCtx, 0, audio_dst_filename, 1);
-
-
 
     pCodec = avcodec_find_encoder(pCodecCtx->codec_id);
     if (!pCodec){
@@ -681,12 +481,189 @@ int main (int argc, char **argv)
         return -1;
     }
 
+    y_size = pCodecCtx->width * pCodecCtx->height;
+
     pFrame = av_frame_alloc();
+    pFrame->width = 240;
+    pFrame->height = 160;
+    pFrame->format = pCodecCtx->pix_fmt;
+
     picture_size = avpicture_get_size(pCodecCtx->pix_fmt, pCodecCtx->width, pCodecCtx->height);
     picture_buf = (uint8_t *)av_malloc(picture_size);
     avpicture_fill((AVPicture *)pFrame, picture_buf, pCodecCtx->pix_fmt, pCodecCtx->width, pCodecCtx->height);
 
-    printf("picture_buf = %d\n", picture_size);
+    
+}
+
+static int init_audio_out_context(){
+    AudFormatCtx = avformat_alloc_context();
+    Audofmt = av_guess_format(NULL, audio_dst_filename, NULL);
+    AudFormatCtx->oformat = Audofmt;
+
+    if (avio_open(&AudFormatCtx->pb,audio_dst_filename, AVIO_FLAG_READ_WRITE) < 0){  
+        printf("Failed to open output file!\n");  
+        return -1;  
+    }  
+
+    audio_st = avformat_new_stream(AudFormatCtx, 0);  
+    if (audio_st==NULL){  
+        return -1;  
+    }
+
+
+    AudCodecCtx = audio_st->codec;
+    AudCodecCtx->codec_id = Audofmt->audio_codec;
+    AudCodecCtx->codec_type = AVMEDIA_TYPE_AUDIO;
+    AudCodecCtx->sample_fmt = AV_SAMPLE_FMT_S16;
+    AudCodecCtx->sample_rate= 12000;
+    AudCodecCtx->channel_layout=AV_CH_LAYOUT_STEREO;
+    AudCodecCtx->channels = av_get_channel_layout_nb_channels(AudCodecCtx->channel_layout);
+    AudCodecCtx->bit_rate           = audio_dec_ctx->bit_rate;
+    AudCodec = avcodec_find_encoder(AudCodecCtx->codec_id);  
+    if (!AudCodec){  
+        printf("Can not find encoder!\n");  
+        return -1;  
+    }  
+    if (avcodec_open2(AudCodecCtx, AudCodec,NULL) < 0){  
+        printf("Failed to open encoder!\n");  
+        return -1;  
+    } 
+
+    //Show some information  
+    av_dump_format(AudFormatCtx, 0, audio_dst_filename, 1);
+
+    AudFrame = av_frame_alloc();  
+    AudFrame->nb_samples     = AudCodecCtx->frame_size;
+    AudFrame->format         = AudCodecCtx->sample_fmt;
+    // AudFrame->channel_layout = AudCodecCtx->channel_layout;
+
+    aud_buffer_size = av_samples_get_buffer_size(NULL, AudCodecCtx->channels,AudCodecCtx->frame_size,AudCodecCtx->sample_fmt, 1);  
+    sample_buf = (uint8_t *)av_malloc(aud_buffer_size);  
+    avcodec_fill_audio_frame(AudFrame, AudCodecCtx->channels, AudCodecCtx->sample_fmt,(const uint8_t*)sample_buf, aud_buffer_size, 1);
+
+    return 0;
+}
+
+static int init_input(){
+    int ret;
+    //get input format
+    /* open input file, and allocate format context */
+    if (avformat_open_input(&fmt_ctx, src_filename, NULL, NULL) < 0) {
+        fprintf(stderr, "Could not open source file %s\n", src_filename);
+        exit(1);
+    }
+
+    /* retrieve stream information */
+    if (avformat_find_stream_info(fmt_ctx, NULL) < 0) {
+        fprintf(stderr, "Could not find stream information\n");
+        exit(1);
+    }
+
+    //get input codec and stream
+    if (open_codec_context(&video_stream_idx, fmt_ctx, AVMEDIA_TYPE_VIDEO) >= 0) {
+        video_stream = fmt_ctx->streams[video_stream_idx];
+        video_dec_ctx = video_stream->codec;
+        pCodecCtx = video_stream->codec;
+
+        video_dst_file = fopen(video_dst_filename, "wb");
+        if (!video_dst_file) {
+            fprintf(stderr, "Could not open destination file %s\n", video_dst_filename);
+            ret = 1;
+            return -1;
+        }
+
+        /* allocate image where the decoded image will be put */
+        width = video_dec_ctx->width;
+        height = video_dec_ctx->height;
+        pix_fmt = video_dec_ctx->pix_fmt;
+        ret = av_image_alloc(video_dst_data, video_dst_linesize,
+                             width, height, pix_fmt, 1);
+        if (ret < 0) {
+            fprintf(stderr, "Could not allocate raw video buffer\n");
+            return -1;
+        }
+        video_dst_bufsize = ret;
+    }
+
+    if (open_codec_context(&audio_stream_idx, fmt_ctx, AVMEDIA_TYPE_AUDIO) >= 0) {
+        audio_stream = fmt_ctx->streams[audio_stream_idx];
+        audio_dec_ctx = audio_stream->codec;
+        AudCodecCtx = audio_stream->codec;
+        audio_dst_file = fopen(audio_dst_filename, "wb");
+        if (!audio_dst_file) {
+            fprintf(stderr, "Could not open destination file %s\n", audio_dst_filename);
+            ret = 1;
+            return -1;
+        }
+    }
+
+
+    /* dump input information to stderr */
+    av_dump_format(fmt_ctx, 0, src_filename, 0);
+    return 0;
+
+}
+
+int main (int argc, char **argv)
+{
+    int ret = 0, got_frame;
+    int Audret = 0;
+
+    if (argc != 4 && argc != 5) {
+        fprintf(stderr, "input  1.source file:%s\n"
+                                "2.output_video\n"
+                                "3.output_audio\n"
+                                "4.mux video file(Optional)\n"
+                "\n", argv[0]);
+        exit(1);
+    }
+    
+    src_filename = argv[1];
+    video_dst_filename = argv[2];
+    audio_dst_filename = argv[3];
+    //optional mux to any type video
+
+    /* register all formats and codecs */
+    av_register_all();
+    //for network stream
+    avformat_network_init();
+
+    ret = init_input();
+    if(ret<0){
+       goto end; 
+    }
+    ret = init_video_out_context();
+    if(ret<0){
+       goto end; 
+    }
+    ret = init_audio_out_context();
+    if(ret<0){
+       goto end; 
+    }
+    
+
+
+    if (!audio_stream && !video_stream) {
+        fprintf(stderr, "Could not find audio or video stream in the input, aborting\n");
+        ret = 1;
+        goto end;
+    }
+
+    /* When using the new API, you need to use the libavutil/frame.h API, while
+     * the classic frame management is available in libavcodec */
+    
+    frame = av_frame_alloc();
+    if (!frame) {
+        fprintf(stderr, "Could not allocate frame\n");
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+
+    if (video_stream)
+        printf("Demuxing video from file '%s' into '%s'\n", src_filename, video_dst_filename);
+    if (audio_stream)
+        printf("Demuxing audio from file '%s' into '%s'\n", src_filename, audio_dst_filename);
+
 
     //Write video Header
     avformat_write_header(pFormatCtx,NULL);
@@ -696,10 +673,7 @@ int main (int argc, char **argv)
     av_new_packet(&AudPkt,aud_buffer_size);  
     av_new_packet(&epkt,picture_size);
 
-    y_size = pCodecCtx->width * pCodecCtx->height;
-    pFrame->width = 240;
-    pFrame->height = 160;
-    pFrame->format = pCodecCtx->pix_fmt;
+    
     swr = swr_alloc();
     av_opt_set_int(swr, "in_channel_layout",  audio_dec_ctx->channel_layout, 0);
     av_opt_set_int(swr, "out_channel_layout", AudCodecCtx->channel_layout,  0);
@@ -710,10 +684,12 @@ int main (int argc, char **argv)
     swr_init(swr);
 
 
+    int frame_index = 0;
 
     /* read frames from the file */
     while (av_read_frame(fmt_ctx, &pkt) >= 0) {
         AVPacket orig_pkt = pkt;
+        
         do {
             ret = decode_packet(&got_frame, 0);
             if (ret < 0)
@@ -721,7 +697,7 @@ int main (int argc, char **argv)
             pkt.data += ret;
             pkt.size -= ret;
         } while (pkt.size > 0);
-        av_free_packet(&orig_pkt);
+        av_free_packet(&pkt);
     }
 
     /* flush cached frames */
@@ -750,7 +726,7 @@ int main (int argc, char **argv)
     av_write_trailer(pFormatCtx);
   
     //Writeaudio Trailer  
-    av_write_trailer(AudFormatCtx);  
+    av_write_trailer(AudFormatCtx);
   
     
 
@@ -790,6 +766,7 @@ int main (int argc, char **argv)
 
 
 end:
+
     //Clean  
     if (audio_st){  
         avcodec_close(audio_st->codec);  
