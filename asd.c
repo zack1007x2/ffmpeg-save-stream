@@ -84,6 +84,9 @@ static uint8_t *sample_buf;
 static int16_t* outputBuffer;
 SwrContext *swr;
 
+static AVOutputFormat *ofmt = NULL;  
+static AVFormatContext *ofmt_ctx = NULL; 
+
 
 /* The different ways of decoding and managing data memory. You are not
  * supposed to support all the modes in your application but pick the one most
@@ -260,7 +263,7 @@ static int decode_packet(int *got_frame, int cached)
             pFrame->data[1] = picture_buf+ y_size;      // U 
             pFrame->data[2] = picture_buf+ y_size*5/4;  // V
             //PTS
-            pFrame->pts=video_frame_count;
+            
             int got_picture=0;
             //Encode
             int ret = avcodec_encode_video2(pCodecCtx, &epkt,pFrame, &got_picture);
@@ -441,8 +444,9 @@ static int init_video_out_context(){
     pCodecCtx->width = width;  
     pCodecCtx->height = height;
     pCodecCtx->time_base.num = 1;  
-    pCodecCtx->time_base.den = 25;  
-    pCodecCtx->bit_rate = 400000;  
+    pCodecCtx->time_base.den = 24; 
+    // pCodecCtx->time_base = video_dec_ctx->time_base;
+    pCodecCtx->bit_rate = video_dec_ctx->bit_rate;  
     pCodecCtx->gop_size=10;
     //H264
     //pCodecCtx->me_range = 16;
@@ -452,7 +456,7 @@ static int init_video_out_context(){
     pCodecCtx->qmax = 51;
 
     //Optional Param
-    pCodecCtx->max_b_frames=3;
+    pCodecCtx->max_b_frames=video_dec_ctx->max_b_frames;
 
     // Set Option
     AVDictionary *param = 0;
@@ -515,7 +519,7 @@ static int init_audio_out_context(){
     AudCodecCtx->codec_id = Audofmt->audio_codec;
     AudCodecCtx->codec_type = AVMEDIA_TYPE_AUDIO;
     AudCodecCtx->sample_fmt = AV_SAMPLE_FMT_S16;
-    AudCodecCtx->sample_rate= 12000;
+    AudCodecCtx->sample_rate= audio_dec_ctx->sample_rate;
     AudCodecCtx->channel_layout=AV_CH_LAYOUT_STEREO;
     AudCodecCtx->channels = av_get_channel_layout_nb_channels(AudCodecCtx->channel_layout);
     AudCodecCtx->bit_rate           = audio_dec_ctx->bit_rate;
@@ -608,6 +612,8 @@ int main (int argc, char **argv)
 {
     int ret = 0, got_frame;
     int Audret = 0;
+    int videoindex_v=-1,videoindex_out=-1;  
+    int audioindex_a=-1,audioindex_out=-1;  
 
     if (argc != 4 && argc != 5) {
         fprintf(stderr, "input  1.source file:%s\n"
@@ -622,6 +628,9 @@ int main (int argc, char **argv)
     video_dst_filename = argv[2];
     audio_dst_filename = argv[3];
     //optional mux to any type video
+    if(argc == 5){
+        out_filename = argv[4];
+    }
 
     /* register all formats and codecs */
     av_register_all();
@@ -641,13 +650,100 @@ int main (int argc, char **argv)
        goto end; 
     }
     
-
+    //output
+    avformat_alloc_output_context2(&ofmt_ctx, NULL, NULL, out_filename);  
+    if (!ofmt_ctx) {  
+        printf( "Could not create output context\n");  
+        ret = AVERROR_UNKNOWN;  
+        goto end;  
+    }  
+    ofmt = ofmt_ctx->oformat; 
 
     if (!audio_stream && !video_stream) {
         fprintf(stderr, "Could not find audio or video stream in the input, aborting\n");
         ret = 1;
         goto end;
     }
+
+
+
+
+
+    for (int i = 0; i < pFormatCtx->nb_streams; i++) {  
+        //Create output AVStream according to input AVStream  
+        if(pFormatCtx->streams[i]->codec->codec_type==AVMEDIA_TYPE_VIDEO){  
+        AVStream *in_stream = pFormatCtx->streams[i];  
+        AVStream *out_stream = avformat_new_stream(ofmt_ctx, in_stream->codec->codec);  
+        videoindex_v=i;  
+        if (!out_stream) {  
+            printf( "Failed allocating output stream\n");  
+            ret = AVERROR_UNKNOWN;  
+            goto end;  
+        }  
+        videoindex_out=out_stream->index;  
+        //Copy the settings of AVCodecContext  
+        if (avcodec_copy_context(out_stream->codec, in_stream->codec) < 0) {  
+            printf( "Failed to copy context from input to output stream codec context\n");  
+            goto end;  
+        }  
+        out_stream->codec->codec_tag = 0;  
+        if (ofmt_ctx->oformat->flags & AVFMT_GLOBALHEADER)  
+            out_stream->codec->flags |= CODEC_FLAG_GLOBAL_HEADER;  
+        break;  
+        }  
+    }  
+  
+    for (int i = 0; i < AudFormatCtx->nb_streams; i++) {  
+        //Create output AVStream according to input AVStream  
+        if(AudFormatCtx->streams[i]->codec->codec_type==AVMEDIA_TYPE_AUDIO){  
+            AVStream *in_stream = AudFormatCtx->streams[i];  
+            AVStream *out_stream = avformat_new_stream(ofmt_ctx, in_stream->codec->codec);  
+            audioindex_a=i;  
+            if (!out_stream) {  
+                printf( "Failed allocating output stream\n");  
+                ret = AVERROR_UNKNOWN;  
+                goto end;  
+            }  
+            audioindex_out=out_stream->index;  
+            //Copy the settings of AVCodecContext  
+            if (avcodec_copy_context(out_stream->codec, in_stream->codec) < 0) {  
+                printf( "Failed to copy context from input to output stream codec context\n");  
+                goto end;  
+            }  
+            out_stream->codec->codec_tag = 0;  
+            if (ofmt_ctx->oformat->flags & AVFMT_GLOBALHEADER)  
+                out_stream->codec->flags |= CODEC_FLAG_GLOBAL_HEADER;  
+  
+            break;  
+        }  
+    }  
+
+
+
+
+
+    //Open output file  
+    if (!(ofmt->flags & AVFMT_NOFILE)) {  
+        if (avio_open(&ofmt_ctx->pb, out_filename, AVIO_FLAG_WRITE) < 0) {  
+            printf( "Could not open output file '%s'", out_filename);  
+            goto end;  
+        }  
+    }  
+    //Write file header  
+    if (avformat_write_header(ofmt_ctx, NULL) < 0) {  
+        printf( "Error occurred when opening output file\n");  
+        goto end;  
+    }
+
+
+
+#if USE_H264BSF  
+    AVBitStreamFilterContext* h264bsfc =  av_bitstream_filter_init("h264_mp4toannexb");   
+#endif  
+#if USE_AACBSF  
+    AVBitStreamFilterContext* aacbsfc =  av_bitstream_filter_init("aac_adtstoasc");   
+#endif 
+
 
     /* When using the new API, you need to use the libavutil/frame.h API, while
      * the classic frame management is available in libavcodec */
@@ -689,6 +785,14 @@ int main (int argc, char **argv)
     /* read frames from the file */
     while (av_read_frame(fmt_ctx, &pkt) >= 0) {
         AVPacket orig_pkt = pkt;
+        AVPacket opkt;
+        av_init_packet(&opkt);
+
+        AVFormatContext *ifmt_ctx;  
+        int stream_index=0;  
+        AVStream *in_stream, *out_stream; 
+        in_stream  = fmt_ctx->streams[pkt.stream_index];  
+        out_stream = ofmt_ctx->streams[stream_index];  
         
         do {
             ret = decode_packet(&got_frame, 0);
