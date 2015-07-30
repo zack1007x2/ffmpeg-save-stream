@@ -80,9 +80,6 @@ static AVFrame *AudFrame;
 static AVPacket AudPkt;
 SwrContext *swr;
 
-static AVOutputFormat *ofmt = NULL;
-static AVFormatContext *ofmt_ctx = NULL;
-
 
 void print_hex(uint8_t *s, size_t len) {
     int counter=0;
@@ -135,22 +132,22 @@ int flush_encoder(AVFormatContext *fmt_ctx,unsigned int stream_index){
 }
 
 
-static int decode_packet(int *got_frame)
+static int decode_packet()
 {
     int ret = 0;
     int decoded = pkt.size;
-    *got_frame = 0;
+    int got_frame = 0;
     
     
     if (pkt.stream_index == video_stream_idx) {
         /* decode video frame */
-        ret = avcodec_decode_video2(video_dec_ctx, frame, got_frame, &pkt);
+        ret = avcodec_decode_video2(video_dec_ctx, frame, &got_frame, &pkt);
         if (ret < 0) {
             fprintf(stderr, "Error decoding video frame (%s)\n", av_err2str(ret));
             return ret;
         }
         
-        if (*got_frame) {
+        if (got_frame) {
             
             if (frame->width != width || frame->height != height ||
                 frame->format != pix_fmt) {
@@ -212,7 +209,7 @@ static int decode_packet(int *got_frame)
         int retuu;
         
         /* decode audio frame */
-        ret = avcodec_decode_audio4(audio_dec_ctx, frame, got_frame, &pkt);
+        ret = avcodec_decode_audio4(audio_dec_ctx, frame, &got_frame, &pkt);
         if (ret < 0) {
             fprintf(stderr, "Error decoding audio frame (%s)\n", av_err2str(ret));
             return ret;
@@ -223,7 +220,7 @@ static int decode_packet(int *got_frame)
          * Also, some decoders might over-read the packet. */
         decoded = FFMIN(ret, pkt.size);
         
-        if (*got_frame) {
+        if (got_frame) {
             
             ret = swr_convert(swr,
                               AudFrame->data, frame->nb_samples,
@@ -376,8 +373,6 @@ static int init_video_out_context(){
 }
 
 static int init_audio_out_context(uint8_t *sample_buf){
-
-    int aud_buffer_size;
     
 
     AudFormatCtx = avformat_alloc_context();
@@ -415,16 +410,6 @@ static int init_audio_out_context(uint8_t *sample_buf){
     
     //Show some information
     av_dump_format(AudFormatCtx, 0, audio_dst_filename, 1);
-    
-    AudFrame = av_frame_alloc();
-    AudFrame->nb_samples     = AudCodecCtx->frame_size;
-    AudFrame->format         = AudCodecCtx->sample_fmt;
-    // AudFrame->channel_layout = AudCodecCtx->channel_layout;
-    
-    aud_buffer_size = av_samples_get_buffer_size(NULL, AudCodecCtx->channels,AudCodecCtx->frame_size,AudCodecCtx->sample_fmt, 1);
-    sample_buf = (uint8_t *)av_malloc(aud_buffer_size);
-    avcodec_fill_audio_frame(AudFrame, AudCodecCtx->channels, AudCodecCtx->sample_fmt,(const uint8_t*)sample_buf, aud_buffer_size, 1);
-    av_new_packet(&AudPkt,aud_buffer_size);
     
     return 0;
 }
@@ -488,27 +473,15 @@ static int init_input(){
     
 }
 
-static int init_output(){
+static int init_output(AVFormatContext *ofmt_ctx){
     int ret;
-    //output
-    avformat_alloc_output_context2(&ofmt_ctx, NULL, NULL, out_filename);
-    if (!ofmt_ctx) {
-        printf( "Could not create output context\n");
-        ret = AVERROR_UNKNOWN;
-        return 1;
-    }
-    ofmt = ofmt_ctx->oformat;
-    
-    if (!audio_stream && !video_stream) {
-        fprintf(stderr, "Could not find audio or video stream in the input, aborting\n");
-        ret = 1;
-        return 1;
-    }
+    AVStream *in_stream;
+    AVStream *out_stream;
     
     for (int i = 0; i < fmt_ctx->nb_streams; i++) {
         
-        AVStream *in_stream = fmt_ctx->streams[i];
-        AVStream *out_stream = avformat_new_stream(ofmt_ctx, in_stream->codec->codec);
+        in_stream = fmt_ctx->streams[i];
+        out_stream = avformat_new_stream(ofmt_ctx, in_stream->codec->codec);
         if (!out_stream) {
             printf( "Failed allocating output stream\n");
             ret = AVERROR_UNKNOWN;
@@ -552,7 +525,9 @@ int remux_packet(AVFormatContext *ofmt_ctx,AVPacket *pkt){
 
 int main (int argc, char **argv){
     int ret = 0, got_frame;
-
+    AVFormatContext *ofmt_ctx = NULL;
+    AVOutputFormat *ofmt = NULL;
+    
 
 
     uint8_t *sample_buf;
@@ -584,22 +559,48 @@ int main (int argc, char **argv){
     if(ret){
         goto end;
     }
+
+
     ret = init_video_out_context();
     if(ret){
         goto end;
     }
+
+
     ret = init_audio_out_context(sample_buf);
     if(ret){
         goto end;
+    }else{
+        int aud_buffer_size;
+        //alloc frame and packet
+        AudFrame = av_frame_alloc();
+        AudFrame->nb_samples     = AudCodecCtx->frame_size;
+        AudFrame->format         = AudCodecCtx->sample_fmt;
+        AudFrame->channel_layout = AudCodecCtx->channel_layout;
+        
+        aud_buffer_size = av_samples_get_buffer_size(NULL, AudCodecCtx->channels,AudCodecCtx->frame_size,AudCodecCtx->sample_fmt, 1);
+        sample_buf = (uint8_t *)av_malloc(aud_buffer_size);
+        avcodec_fill_audio_frame(AudFrame, AudCodecCtx->channels, AudCodecCtx->sample_fmt,(const uint8_t*)sample_buf, aud_buffer_size, 1);
+        av_new_packet(&AudPkt,aud_buffer_size);
     }
     
+    
     if(argc == 5){
-        ret = init_output();
+        //alloc memory
+        avformat_alloc_output_context2(&ofmt_ctx, NULL, NULL, out_filename);
+        if (!ofmt_ctx) {
+            printf( "Could not create output context\n");
+            ret = AVERROR_UNKNOWN;
+            return 1;
+        }
+        ofmt = ofmt_ctx->oformat;
+
+        ret = init_output(ofmt_ctx);
         if(ret){
+            printf("Init output ERROR\n");
             goto end;
         }
     }
-    
     
     if (!(ofmt->flags & AVFMT_NOFILE)) {
         ret = avio_open(&ofmt_ctx->pb, out_filename, AVIO_FLAG_WRITE);
@@ -608,6 +609,7 @@ int main (int argc, char **argv){
             goto end;
         }
     }
+
     ret = avformat_write_header(ofmt_ctx, NULL);
     if (ret < 0) {
         printf( "Error occurred when opening output file\n");
@@ -634,7 +636,6 @@ int main (int argc, char **argv){
     avformat_write_header(AudFormatCtx,NULL);
     
     //alloc packet to get copy from pkt
-    
     av_new_packet(&epkt,picture_size);
     
     /*setup the convert parameter
@@ -657,11 +658,11 @@ int main (int argc, char **argv){
     /*start read frames from the file */
     while (av_read_frame(fmt_ctx, &pkt) >= 0) {
         //do demux & decode -> encode -> output h264 & aac file
-        ret = decode_packet(&got_frame);
+        ret = decode_packet();
+
         if (ret < 0)
             break;
         if(argc == 5){
-            printf("***************************\n");
             remux_packet(ofmt_ctx,&pkt);
         }
         
